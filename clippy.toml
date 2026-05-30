@@ -1,0 +1,3 @@
+# clippy.toml — project-level clippy config
+# Mirrors the scaffold template. READ-ONLY after scaffold.
+msrv = "1.85.0"

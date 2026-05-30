@@ -1,0 +1,131 @@
+{
+  "schema": "autobuilder.intent_card.v1",
+  "prd_source": "/home/jsy/wintermute/autobuilder/PRD-ctrace-scribe.md",
+  "intent_slug": "ctrace-scribe",
+  "root_motivation": "Heavy build sessions die via SIGKILL (cgroup teardown) before the SessionEnd hook fires, leaving ctrace NDJSON logs permanently un-summarized. The gap is measurable (18 missing summaries as of 2026-05-28), grows silently, and corrupts the session-postmortem join that depends on a complete summary record. A reusable single-pass Rust engine with a backfill subcommand closes the gap idempotently and replaces the fragile 6-pass shell renderer.",
+  "user_persona": "Joe Yen on his Arch Linux laptop; runs ctrace sessions daily, relies on session summaries for self-review and session-postmortem pipeline. Runs `scribe backfill` periodically or from cron to keep the summary record complete.",
+  "unfakeable_metric": {
+    "name": "acceptance_tests_passing_count",
+    "lower_is_better": false,
+    "harness_command": "cargo test --workspace --no-fail-fast 2>&1 | grep -c 'test acceptance_.*ok'",
+    "target": 10
+  },
+  "acceptance_criteria": [
+    {
+      "id": "AC1",
+      "level": "MUST",
+      "description": "scribe render <log.ndjson> writes <log>.summary.md containing the Log: line, the duration/event/PID/write count line, and all five section headers (Top binaries, Writes outside expected scope, Deletions, Outbound connect, and Flagged when any flagged write exists).",
+      "test": "tests/acceptance_ac1.rs"
+    },
+    {
+      "id": "AC2",
+      "level": "MUST",
+      "description": "For a fixture log with no flagged writes, the Flagged section is omitted. For a fixture log with a /home/jsy/.ssh/ write, the Flagged section is present and lists it.",
+      "test": "tests/acceptance_ac2.rs"
+    },
+    {
+      "id": "AC3",
+      "level": "MUST",
+      "description": "scribe render on a 124k-event fixture completes in <= 2 seconds and makes a single file pass (verified structurally — no second open of the same file path).",
+      "test": "tests/acceptance_ac3.rs"
+    },
+    {
+      "id": "AC4",
+      "level": "MUST",
+      "description": "A truncated final line (valid prefix, no closing brace) does not fail the render; the summary is produced and reports '1 malformed line skipped'.",
+      "test": "tests/acceptance_ac4.rs"
+    },
+    {
+      "id": "AC5",
+      "level": "MUST",
+      "description": "scribe backfill <dir> renders exactly the *.ndjson files missing a *.summary.md and leaves existing summaries untouched; prints 'rendered N, skipped M' count.",
+      "test": "tests/acceptance_ac5.rs"
+    },
+    {
+      "id": "AC6",
+      "level": "MUST",
+      "description": "scribe backfill <dir> run twice in a row renders 0 on the second run (idempotent).",
+      "test": "tests/acceptance_ac6.rs"
+    },
+    {
+      "id": "AC7",
+      "level": "MUST",
+      "description": "scribe backfill <dir> --dry-run writes no files and exits 0, listing the would-render set.",
+      "test": "tests/acceptance_ac7.rs"
+    },
+    {
+      "id": "AC8",
+      "level": "MUST",
+      "description": "scribe backfill --force <dir> re-renders a log whose summary is older than the ndjson (mtime comparison).",
+      "test": "tests/acceptance_ac8.rs"
+    },
+    {
+      "id": "AC9",
+      "level": "MUST",
+      "description": "--help documents render and backfill with their flags; exits 0.",
+      "test": "tests/acceptance_ac9.rs"
+    },
+    {
+      "id": "AC10",
+      "level": "MUST",
+      "description": "Rendering a non-existent log exits non-zero with a usage error; an empty dir backfills 0 and exits 0.",
+      "test": "tests/acceptance_ac10.rs"
+    }
+  ],
+  "scope": [
+    "Single-pass NDJSON streaming renderer for ctrace session logs",
+    "scribe render subcommand: one log to one summary.md",
+    "scribe backfill subcommand: idempotent bulk render of a directory",
+    "Output parity with summarize-ctrace-session.sh (same sections, same in_scope/flag_paths regexes)",
+    "Robustness to malformed/truncated lines (never fatal)",
+    "--dry-run and --force flags for backfill",
+    "--out PATH flag for render (stdout with --out -)"
+  ],
+  "non_goals": [
+    "No async runtime (sync I/O only)",
+    "No daemon/watch mode; purely batch processing",
+    "No schema evolution of ctrace NDJSON (parses the current format only)",
+    "Does not replace or modify the existing SessionEnd hook or shell script",
+    "No web UI, TUI, or interactive mode",
+    "No network egress of any kind",
+    "Does not manage or rotate ctrace log files"
+  ],
+  "hard_constraints": {
+    "rust_edition": "2024",
+    "target_kind": "cli",
+    "deny_unsafe": true,
+    "max_deps": 8,
+    "msrv": "1.85",
+    "additional": {
+      "no_async_runtime": "sync I/O only; tokio/async-std are banned dependencies"
+    }
+  },
+  "five_whys_trace": [
+    {
+      "why": 1,
+      "q": "Why do we need a Rust binary instead of fixing the shell script?",
+      "a": "The shell script makes 6 full passes (1 awk + 5 jq) over each file. For 18+ files or a 300-file rollup, that becomes jq storms and ARG_MAX hits. The real problem is the SessionEnd hook never fires on SIGKILL'd sessions, so no backfill mechanism exists at all — we need a new tool."
+    },
+    {
+      "why": 2,
+      "q": "Why do sessions get SIGKILL'd instead of SIGTERM'd gracefully?",
+      "a": "Heavy build/kernel sessions run as headless services under claude-build.service's cgroup. When the /build tick ends, the cgroup is torn down and all children receive SIGKILL — no chance to run the SessionEnd hook. Memory note: self_build_detached_cgroup_teardown."
+    },
+    {
+      "why": 3,
+      "q": "Why is the gap in summaries a real problem rather than a cosmetic one?",
+      "a": "The session-postmortem pipeline (visions/continuity.md) joins ctrace summaries with four other substrates. Missing summaries corrupt the join and hide what happened in the most resource-intensive sessions — exactly the ones most worth reviewing."
+    }
+  ],
+  "ambiguities_resolved": [
+    {
+      "question": "What exactly does 'output parity' mean — pixel-perfect or functionally equivalent?",
+      "resolution": "Functionally equivalent: same sections present/absent under the same conditions, same in_scope and flag_paths regex sets. Whitespace/formatting details are not mandated."
+    },
+    {
+      "question": "Should the render subcommand also support --out - (stdout)?",
+      "resolution": "Yes, per PRD: --out PATH flag, and --out - for stdout."
+    }
+  ],
+  "created_at": "2026-05-29T00:00:00Z"
+}
